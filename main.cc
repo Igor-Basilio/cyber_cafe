@@ -21,10 +21,9 @@
 /* 
  * Time conventions used :
  *
- * 3 Seconds -> 1 Day
- * 1 Seconds  -> 8 Hours / 28800 Seconds
- * 1 / 28800 Seconds -> 1 Seconds
- * 34.72 Microseconds -> 1 Seconds
+ * 1 Simulated Second == 0.001 Real Seconds
+ * Aka
+ * 1 Simulated Second == 1 Real Millisecond
  *
  * Also all time printed from 0 -> 8 
  * assumes that the cafe opened at "0" 
@@ -45,9 +44,12 @@
  *
 */
 
-#define DAY 3
-#define _8HOURS 1
-#define SECOND 0.00003472222
+#define SECOND 0.001
+#define MILLISECOND (SECOND/1000)
+#define MICROSECOND (MILLISECOND/1000)
+#define MINUTE (60*SECOND)
+#define HOUR (60*MINUTE)
+#define DAY (24*HOUR) 
 
 typedef enum {
     Gamer,
@@ -76,7 +78,11 @@ typedef struct {
 typedef struct{
     pthread_t p; 
     client_type t;
-    float time;
+
+    float arrival_time;
+    float time_spent_waiting;
+
+    float res_time;
     int UID;
     bool serviced;
 } client;
@@ -109,7 +115,7 @@ void open_cafe(cyber_flux *f)
   f->pcs->num = 10;
   f->pcs->used = 0;
 
-  f->headsets->num = 6;
+  f->headsets->num = 6; 
   f->headsets->used = 0;
   
   f->seats->num = 8;
@@ -126,18 +132,22 @@ void open_cafe(cyber_flux *f)
   sem_init(&(f->headsets->sem), 0, f->headsets->num);
   sem_init(&(f->seats->sem), 0, f->seats->num);
 
-  f->total_time = 1;
+  f->total_time = (8 * HOUR);
   f->c_size = 0;
   f->time_left = f->total_time;
 }
 
 /*
- * Random float in the range [0, 1] inclusive.
+ * Random float in the range [0, 8 * HOUR] inclusive
+ * in units of hours.
+ * Right now : 
+ * [0, 28.8]
 */
 float randomFloat()
 {
-   float r = (float)rand() / (float)RAND_MAX;
-   assert(r>=0&&r<=1);
+   float r =
+       ((float)rand() * (8 * HOUR)) / (float)RAND_MAX;
+   assert(r>=0&&r<=(8*HOUR));
    return r;
 }
 
@@ -155,7 +165,7 @@ real_time cfsttr(float s_time)
 {
     assert(s_time>=0);
     real_time rt = {0, 0, 0};
-    double real_hours = s_time * 8;
+    double real_hours = s_time / HOUR;
     rt.hrs  = (int) real_hours;
     double rem_hours = (real_hours - rt.hrs);
     rt.mins = (int) (rem_hours * 60);
@@ -187,8 +197,8 @@ pthread_mutex_t inc_students   = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t inc_freelancers= PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t time_mutex     = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t rand_mutex     = PTHREAD_MUTEX_INITIALIZER;
-pthread_mutex_t s_mutex     = PTHREAD_MUTEX_INITIALIZER;
-pthread_mutex_t client_mutex     = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t s_mutex        = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t client_mutex   = PTHREAD_MUTEX_INITIALIZER;
 
 void increment_pcs()
 {
@@ -234,10 +244,8 @@ void increment_freelancers()
 
 void *new_client(void *d)
 {
-  pthread_mutex_lock(&client_mutex);
-  client c = *(client *) d;
+  client *c = (client *) d;
   assert(&c!=NULL);
-  pthread_mutex_unlock(&client_mutex);
 
   // Time of arrival at the cafe
   // this simulates random client arrival
@@ -245,22 +253,23 @@ void *new_client(void *d)
   // cafe.time_left.
   pthread_mutex_lock(&time_mutex);
   float arrival = cafe.total_time - cafe.time_left;
+  c->arrival_time = arrival;
   pthread_mutex_unlock(&time_mutex); 
 
-  c.serviced = false;
+  c->serviced = false;
 
   real_time art = cfsttr(arrival);
   char *art_s = real_time_string(&art);
 
   pthread_mutex_lock(&rand_mutex);
-  c.t = (client_type) (rand() % 3);
-  c.time = randomFloat();
-  assert(c.t>=0&&c.t<=2);
+  c->t = (client_type) (rand() % 3);
+  c->res_time = randomFloat();
+  assert(c->t>=0&&c->t<=2);
   pthread_mutex_unlock(&rand_mutex);
 
   (void) fprintf(stdout,
-          "Client {%d} : {%d} arrived at the cafe at time %s\n",
-          c.UID, c.t, art_s);
+          "Client {%d} : {%d} arrived at the cafe at time ( sim %.3f :: real %s )\n",
+          c->UID, c->t, c->arrival_time,art_s);
 
   (void) free(art_s);
 
@@ -268,22 +277,14 @@ void *new_client(void *d)
   // de funcionamento do café
   // ( Tempo de uso dos recursos pelo cliente )
   (void) pthread_mutex_lock(&time_mutex);
-  if (c.time > cafe.time_left)
+  if (c->res_time > cafe.time_left)
   {
       cafe.timed_out++;
-      real_time art = cfsttr(c.time);
-      real_time art_t = cfsttr(cafe.time_left);
-      char *art_s = real_time_string(&art);
-      char *art_ss = real_time_string(&art_t);
-      (void) fprintf(stdout, "Client {%d} : {%d} wanted to use resources for %s\n"
-              "but the cafe would close, instead stayed for %s\n",
-              c.UID, c.t, art_s, art_ss);
-      (void) free(art_s); (void) free(art_ss);
-      c.time = cafe.time_left;
+      c->res_time = cafe.time_left;
   }
   (void) pthread_mutex_unlock(&time_mutex); 
 
-  switch(c.t)
+  switch(c->t)
   {
       case Gamer:{
           increment_gamers();
@@ -297,15 +298,21 @@ void *new_client(void *d)
           sem_wait(&cafe.seats->sem); 
           increment_seats();
 
-          real_time art = cfsttr(c.time);
+          pthread_mutex_lock(&time_mutex);
+          c->time_spent_waiting =
+              (cafe.total_time - cafe.time_left) - c->arrival_time; 
+          pthread_mutex_unlock(&time_mutex);
+
+          real_time art = cfsttr(c->res_time);
           char *art_s = real_time_string(&art);
 
-          sleep(c.time);
-          c.serviced = true;
+          sleep(c->res_time);
+          c->serviced = true;
+
+
           (void) fprintf(stdout, "Client {%d} : {%d} used the resources for %s\n",
-                  c.UID, c.t, art_s);
+                  c->UID, c->t, art_s);
           free(art_s);
-          
 
           sem_post(&cafe.seats->sem); 
           sem_post(&cafe.headsets->sem);
@@ -322,13 +329,19 @@ void *new_client(void *d)
           sem_wait(&cafe.headsets->sem);         
           increment_headsets();
 
-          real_time art = cfsttr(c.time);
+          pthread_mutex_lock(&time_mutex);
+          c->time_spent_waiting =
+              (cafe.total_time - cafe.time_left) - c->arrival_time; 
+          pthread_mutex_unlock(&time_mutex);
+
+          real_time art = cfsttr(c->res_time);
           char *art_s = real_time_string(&art);
-          sleep(c.time);
-          c.serviced = true;
+          sleep(c->res_time);
+          c->serviced = true;
           (void) fprintf(stdout, "Client {%d} : {%d} used the resources for %s\n",
-                  c.UID, c.t, art_s);
+                  c->UID, c->t, art_s);
           free(art_s);
+
 
           sem_post(&cafe.headsets->sem);         
           sem_post(&cafe.seats->sem);
@@ -340,20 +353,26 @@ void *new_client(void *d)
           sem_wait(&cafe.pcs->sem);         
           increment_pcs();
 
-          real_time art = cfsttr(c.time);
+          pthread_mutex_lock(&time_mutex);
+          c->time_spent_waiting =
+              (cafe.total_time - cafe.time_left) - c->arrival_time; 
+          pthread_mutex_unlock(&time_mutex);
+
+          real_time art = cfsttr(c->res_time);
           char *art_s = real_time_string(&art);
-          sleep(c.time);
-          c.serviced = true;
+          sleep(c->res_time);
+          c->serviced = true;
           (void) fprintf(stdout, "Client {%d} : {%d} used the resources for %s\n",
-                  c.UID, c.t, art_s);
+                  c->UID, c->t, art_s);
           free(art_s);
+
 
           sem_post(&cafe.pcs->sem);
           break;
       }
   }
 
-  if(c.serviced)
+  if(c->serviced)
   {
       pthread_mutex_lock(&s_mutex);
       cafe.serviced++;
@@ -382,7 +401,17 @@ void close_cafe(cyber_flux *f, client *cs)
     //(void) free(cs);
 }
 
-void generate_report(cyber_flux *f)
+float c_avg(client cs[])
+{
+    float avg = 0;
+    for(size_t i=0; i < cafe.c_size; i++)
+    {
+       avg += cs[i].time_spent_waiting; 
+    }
+    return avg / cafe.c_size;
+}
+
+void generate_report(cyber_flux *f, client cs[])
 {
     assert(f!=NULL);
    (void) fprintf(stdout, "\nStatistical Report : \n");
@@ -397,8 +426,18 @@ void generate_report(cyber_flux *f)
            f->n_gamers, f->n_freelancers, f->n_students); 
    (void) fprintf(stdout, "Clients that timed out : %lu\n", f->timed_out);
    (void) fprintf(stdout, "Clients that were serviced : %lu\n", f->serviced);
-   (void) fprintf(stdout, "Clients that were not serviced : %lu\n\n",
+   (void) fprintf(stdout, "Clients that were not serviced : %lu\n",
            f->c_size - f->serviced);
+
+   float avg = c_avg(cs);
+   real_time t = cfsttr(avg);
+   char *s = real_time_string(&t);
+
+   (void) fprintf(stdout, "Average wait time for all client types ( sim %.6f "
+           ":: real %s )\n\n",
+           avg, s);
+
+   (void) free(s);
 
    (void) free(f->pcs);
    (void) free(f->seats);
@@ -452,7 +491,6 @@ int main(void)
 
         if(r_prob==5)
         {
-            pthread_mutex_lock(&client_mutex);
             size_t cc = cafe.c_size;
             // Client wants to go to the cafe, this makes it so that
             // he cannot change his mind mid "commute there" etc.
@@ -475,8 +513,6 @@ int main(void)
                 (void) perror("pthread_create failed");
                 (void) exit(EXIT_FAILURE);
             }
-
-            pthread_mutex_unlock(&client_mutex);
         }
 
         // Alocar dinamicamente clientes desse jeito 
@@ -495,10 +531,11 @@ int main(void)
         cond = cafe.time_left > 0;
         (void) pthread_mutex_unlock(&time_mutex);
 
+        (void) usleep(MILLISECOND);
      }
 
     (void) close_cafe(&cafe, cs);
-    (void) generate_report(&cafe);
+    (void) generate_report(&cafe, cs);
     (void) pthread_exit(NULL);
     return EXIT_SUCCESS;
 }
